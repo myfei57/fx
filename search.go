@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
+	"strings"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
@@ -167,6 +169,40 @@ type search struct {
 	cursor  int
 	values  map[*Node][]match
 	keys    map[*Node][]match
+
+	// Distribution of the matches of this search generation, one count
+	// per regexp match: keyMatches in keys, stringMatches in string
+	// values, and scalarMatches in other scalar values (numbers, bools,
+	// null, ...). They sum to len(results).
+	keyMatches    int
+	stringMatches int
+	scalarMatches int
+}
+
+// matchCount is the total number of matches of this search.
+func (s *search) matchCount() int {
+	return s.keyMatches + s.stringMatches + s.scalarMatches
+}
+
+// matchSummary summarizes how the matches distribute across keys, string
+// values and other scalar values, e.g. "3 matches (1 key, 1 string, 1 other)".
+func (s *search) matchSummary() string {
+	return fmt.Sprintf("%d %s (%d %s, %d %s, %d %s)",
+		s.matchCount(), plural(s.matchCount(), "match"),
+		s.keyMatches, plural(s.keyMatches, "key"),
+		s.stringMatches, plural(s.stringMatches, "string"),
+		s.scalarMatches, plural(s.scalarMatches, "other"))
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
+	}
+	if strings.HasSuffix(word, "ch") || strings.HasSuffix(word, "s") ||
+		strings.HasSuffix(word, "sh") || strings.HasSuffix(word, "x") {
+		return word + "es"
+	}
+	return word + "s"
 }
 
 func newSearch() *search {
@@ -219,6 +255,7 @@ func executeSearch(top, last *Node, s string, cancel <-chan struct{}) (*search, 
 		if n.Key != "" {
 			indexes := re.FindAllStringIndex(n.Key, -1)
 			if len(indexes) > 0 {
+				result.keyMatches += len(indexes)
 				for i, pair := range indexes {
 					result.results = append(result.results, n)
 					result.keys[n] = append(result.keys[n], match{start: pair[0], end: pair[1], index: searchIndex + i})
@@ -228,6 +265,11 @@ func executeSearch(top, last *Node, s string, cancel <-chan struct{}) (*search, 
 		}
 		indexes := re.FindAllStringIndex(n.Value, -1)
 		if len(indexes) > 0 {
+			if n.Kind == String {
+				result.stringMatches += len(indexes)
+			} else {
+				result.scalarMatches += len(indexes)
+			}
 			for range indexes {
 				result.results = append(result.results, n)
 			}

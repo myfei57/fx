@@ -701,6 +701,156 @@ func TestSearchEmptyAndShortStringsWithWrap(t *testing.T) {
 	}
 }
 
+// distribution runs a search and returns its match distribution.
+func distribution(t *testing.T, jsonData, term string) *search {
+	t.Helper()
+	head, err := Parse([]byte(jsonData))
+	require.NoError(t, err)
+
+	m := &model{
+		viewState: viewState{
+			top:    head,
+			head:   head,
+			search: newSearch(),
+		},
+	}
+	doSearch(m, term)
+	require.Nil(t, m.search.err, "search for %q should not error", term)
+	return m.search
+}
+
+// TestSearchMatchDistribution checks matches are counted per occurrence and
+// split among keys, string values and other scalar values.
+func TestSearchMatchDistribution(t *testing.T) {
+	cases := []struct {
+		name                   string
+		jsonData, term         string
+		keys, strings, scalars int
+		total                  int
+	}{
+		{"key", `{"name": "Alice"}`, "name", 1, 0, 0, 1},
+		{"string value", `{"name": "Alice"}`, "Alice", 0, 1, 0, 1},
+		{"key and value of one node", `{"name": "Alice"}`, "a", 1, 1, 0, 2},
+		{"number", `{"n": 42}`, "42", 0, 0, 1, 1},
+		{"boolean", `{"b": true}`, "true", 0, 0, 1, 1},
+		{"null", `{"x": null}`, "null", 0, 0, 1, 1},
+		{"root string", `"hello"`, "hello", 0, 1, 0, 1},
+		{"root number", `42`, "42", 0, 0, 1, 1},
+		{"root boolean", `false`, "false", 0, 0, 1, 1},
+		{"root null", `null`, "null", 0, 0, 1, 1},
+		// The same term repeats in a key and in a value: every occurrence
+		// is counted, not every node.
+		{"duplicate matches", `{"xxx": "xxx xxx"}`, "x", 3, 6, 0, 9},
+		{"all categories", `{"a42": "42", "b": 42, "c": true}`, "42", 1, 1, 1, 3},
+		{"empty result", `{"name": "Alice"}`, "zzz", 0, 0, 0, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := distribution(t, tc.jsonData, tc.term)
+			assert.Equal(t, tc.keys, s.keyMatches, "key matches")
+			assert.Equal(t, tc.strings, s.stringMatches, "string matches")
+			assert.Equal(t, tc.scalars, s.scalarMatches, "other scalar matches")
+			assert.Equal(t, tc.total, s.matchCount(), "total matches")
+			assert.Len(t, s.results, tc.total, "total matches equals navigable results")
+		})
+	}
+}
+
+// TestSearchDistributionWrappedStrings counts each match once even when a
+// string is split into chunks, including matches wider than a chunk that span
+// chunk boundaries.
+func TestSearchDistributionWrappedStrings(t *testing.T) {
+	raw := `{"t": "abc abc abc abc abc"}`
+	terms := map[string]int{"abc": 5, "c a": 4, "abc abc": 2, "zzz": 0}
+
+	head, err := Parse([]byte(raw))
+	require.NoError(t, err)
+	Wrap(head, 9) // Narrow width: the string spans many short chunks.
+	require.NotNil(t, head.Next.ChunkEnd, "the string should be wrapped")
+
+	m := &model{
+		viewState: viewState{
+			top:    head,
+			head:   head,
+			search: newSearch(),
+		},
+		wrap:      true,
+		termWidth: 9,
+	}
+
+	for term, count := range terms {
+		t.Run(term, func(t *testing.T) {
+			plain := distribution(t, raw, term)
+			require.Equal(t, count, plain.stringMatches)
+
+			doSearch(m, term)
+			require.Nil(t, m.search.err)
+			assert.Equal(t, count, m.search.stringMatches,
+				"wrapped and unwrapped counts agree")
+			assert.Len(t, m.search.results, count,
+				"a match split across chunks is one result, not several")
+		})
+	}
+}
+
+// TestSearchMatchSummaryText checks the human-readable distribution summary.
+func TestSearchMatchSummaryText(t *testing.T) {
+	assert.Equal(t, "0 matches (0 keys, 0 strings, 0 others)", newSearch().matchSummary())
+
+	s := distribution(t, `{"match": "match"}`, "match")
+	assert.Equal(t, "2 matches (1 key, 1 string, 0 others)", s.matchSummary())
+
+	one := distribution(t, `{"a": "b"}`, "b")
+	assert.Equal(t, "1 match (0 keys, 1 string, 0 others)", one.matchSummary())
+}
+
+// TestSearchMatchSummaryRendered checks the completed-search row keeps the
+// navigation indicator and shows the distribution summary.
+func TestSearchMatchSummaryRendered(t *testing.T) {
+	m := newQueryModel(t, `{"match": "match", "n": 42}`)
+	doSearch(m, "match")
+	m.searchInput.SetValue("match")
+
+	out := view(m)
+	assert.Contains(t, out, "found: [1/2]", "navigation indicator is unchanged")
+	assert.Contains(t, out, "2 matches (1 key, 1 string, 0 others)")
+
+	doSearch(m, "zzz")
+	m.searchInput.SetValue("zzz")
+	out = view(m)
+	assert.Contains(t, out, "not found")
+	assert.Zero(t, m.search.matchCount())
+}
+
+// TestSearchRedoKeepsSummaryConsistent checks a synchronous redo (e.g. after
+// a resize) recomputes the distribution of the current generation.
+func TestSearchRedoKeepsSummaryConsistent(t *testing.T) {
+	m := newQueryModel(t, `{"name": "alice", "age": 30}`)
+	doSearch(m, "alice")
+	require.Equal(t, 1, m.search.stringMatches)
+
+	m.searchInput.SetValue("alice")
+	m.redoSearch()
+	assert.Equal(t, 1, m.search.matchCount())
+	assert.Equal(t, 1, m.search.stringMatches)
+	assert.Zero(t, m.search.keyMatches)
+	assert.Zero(t, m.search.scalarMatches)
+}
+
+// TestSearchEscClearsSummary checks cancelling the search input discards the
+// distribution along with the results.
+func TestSearchEscClearsSummary(t *testing.T) {
+	m := newQueryModel(t, `{"name": "alice"}`)
+	doSearch(m, "alice")
+	require.NotZero(t, m.search.matchCount())
+
+	m.handleSearchKey(press("esc"))
+	assert.Zero(t, m.search.matchCount())
+	assert.Empty(t, m.search.results)
+	assert.Empty(t, m.searchInput.Value())
+}
+
 func TestSearchRegexAcrossChunks(t *testing.T) {
 	// Test regex patterns that might match across chunk boundaries
 	jsonData := `{"content": "email: user@example.com phone: 123-456-7890 date: 2024-01-15"}`

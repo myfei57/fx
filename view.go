@@ -243,7 +243,10 @@ func (m *model) render() string {
 			screen = append(screen, flex(m.termWidth, re, "not found")...)
 		} else {
 			cursor := fmt.Sprintf("found: [%v/%v]", m.search.cursor+1, len(m.search.results))
-			screen = append(screen, flex(m.termWidth, re, cursor)...)
+			// Distribution summary of the completed search; the cursor
+			// indicator above keeps the search navigation unchanged.
+			status := cursor + "  " + m.search.matchSummary()
+			screen = append(screen, flex(m.termWidth, re, status)...)
 		}
 	} else if m.queryInput.Value() != "" {
 		screen = append(screen, '\n')

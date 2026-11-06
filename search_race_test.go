@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	. "github.com/antonmedv/fx/internal/jsonx"
@@ -157,6 +158,86 @@ func TestSearch_EscDropsFinishedResult(t *testing.T) {
 	m.Update(press("esc"))
 	m.Update(msg)
 	require.Empty(t, m.search.results, "the search was cancelled before its result arrived")
+}
+
+// A search stopped in the middle must not leave a partial distribution:
+// its result is dropped, and the next search reports only its own counts.
+func TestSearch_CancelledSummaryNotApplied(t *testing.T) {
+	m := loadModel(t, bigInput(), 40, 10)
+	keys(m, "z") // Wrap the long strings.
+
+	msgs := startSearch(m, "needle")
+	m.Update(tea.WindowSizeMsg{Width: 50, Height: 10}) // The edit stops the search.
+	require.False(t, m.searching, "the resize stopped the search")
+	finishSearch(t, m, msgs) // The stopped generation's message is dropped.
+	require.Empty(t, m.search.results, "no results of the stopped search")
+	require.Zero(t, m.search.matchCount(), "no partial distribution remains")
+
+	// While the next search runs, no summary of partial results is shown.
+	next := startSearch(m, "needle")
+	require.True(t, m.searching)
+	require.NotContains(t, view(m), "matches (")
+
+	finishSearch(t, m, next)
+	require.False(t, m.searching)
+	require.Len(t, m.search.results, 6000) // 2 needles per document, 3000 documents
+	require.Equal(t, 6000, m.search.matchCount())
+	require.Equal(t, 6000, m.search.stringMatches)
+	require.Zero(t, m.search.keyMatches)
+	require.Zero(t, m.search.scalarMatches)
+}
+
+// A result of a generation the user searched over never replaces the
+// current generation's distribution.
+func TestSearch_StaleSummaryRejected(t *testing.T) {
+	m := loadModel(t, `{"a": "needle", "b": "needle"}`, 40, 10)
+
+	first := startSearch(m, "needle")
+	m.cancelSearch() // The user searches again: the first generation is stale.
+	finishSearch(t, m, first)
+	require.Empty(t, m.search.results)
+	require.Zero(t, m.search.matchCount())
+
+	finishSearch(t, m, startSearch(m, "needle"))
+	require.Len(t, m.search.results, 2)
+	require.Equal(t, 2, m.search.matchCount())
+	require.Equal(t, 2, m.search.stringMatches)
+
+	// A late result of an old generation, even with inflated counts, is
+	// ignored: the current generation's distribution stays intact.
+	stale := newSearch()
+	stale.results = []*Node{m.top}
+	stale.keyMatches = 42
+	stale.stringMatches = 42
+	stale.scalarMatches = 42
+	currentID := m.searchID
+	m.Update(searchResultMsg{id: currentID - 1, search: stale})
+	require.Equal(t, 2, m.search.matchCount(), "the stale result must not mix in")
+	require.Equal(t, 2, m.search.stringMatches)
+	require.Zero(t, m.search.keyMatches)
+}
+
+// Searching again replaces the previous distribution instead of adding to it.
+func TestSearch_NewSearchReplacesSummary(t *testing.T) {
+	m := loadModel(t, `{"name": "alice", "age": 30}`, 40, 10)
+
+	doSearch(m, "alice")
+	require.Equal(t, 1, m.search.stringMatches)
+	require.Equal(t, 1, m.search.matchCount())
+
+	doSearch(m, "30")
+	assert.Equal(t, 1, m.search.matchCount(), "only the new search's matches count")
+	assert.Zero(t, m.search.stringMatches)
+	assert.Equal(t, 1, m.search.scalarMatches)
+
+	doSearch(m, "name")
+	assert.Equal(t, 1, m.search.matchCount())
+	assert.Equal(t, 1, m.search.keyMatches)
+	assert.Zero(t, m.search.scalarMatches)
+
+	doSearch(m, "zzz")
+	assert.Zero(t, m.search.matchCount())
+	assert.Empty(t, m.search.results)
 }
 
 // stop must not return while a started search still reads the list.
