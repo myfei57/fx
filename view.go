@@ -220,6 +220,9 @@ func (m *model) render() string {
 	} else if m.searchInput.Focused() {
 		screen = append(screen, '\n')
 		screen = append(screen, m.searchInput.View()...)
+		if m.multipleDocs() {
+			screen = append(screen, m.searchScopeHint()...)
+		}
 	} else if m.queryInput.Focused() {
 		for _, line := range m.completionGridView() {
 			screen = append(screen, '\n')
@@ -234,15 +237,19 @@ func (m *model) render() string {
 		if ci {
 			re += "i"
 		}
+		scope := ""
+		if m.searchCurrentDoc {
+			scope = "document "
+		}
 		if m.searching {
-			status := fmt.Sprintf("%s searching...", m.spinner.View())
+			status := fmt.Sprintf("%s%s searching...", scope, m.spinner.View())
 			screen = append(screen, flex(m.termWidth, re, status)...)
 		} else if m.search.err != nil {
 			screen = append(screen, flex(m.termWidth, re, m.search.err.Error())...)
 		} else if len(m.search.results) == 0 {
-			screen = append(screen, flex(m.termWidth, re, "not found")...)
+			screen = append(screen, flex(m.termWidth, re, scope+"not found")...)
 		} else {
-			cursor := fmt.Sprintf("found: [%v/%v]", m.search.cursor+1, len(m.search.results))
+			cursor := fmt.Sprintf("%sfound: [%v/%v]", scope, m.search.cursor+1, len(m.search.results))
 			screen = append(screen, flex(m.termWidth, re, cursor)...)
 		}
 	} else if m.queryInput.Value() != "" {
@@ -261,4 +268,14 @@ func (m *model) centerLine(n *Node) {
 	}
 
 	m.selectNodeInView(n)
+}
+
+// searchScopeHint is the hint after the focused search input showing which
+// documents the search covers and what ctrl+t switches to.
+func (m *model) searchScopeHint() string {
+	if m.searchCurrentDoc {
+		return theme.CurrentTheme.Search(" this document ") +
+			theme.CurrentTheme.Preview("ctrl+t: all documents")
+	}
+	return theme.CurrentTheme.Preview(" ctrl+t: this document")
 }

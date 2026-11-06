@@ -410,6 +410,8 @@ type viewState struct {
 	locationHistory   []location
 	locationIndex     int // position in locationHistory
 	search            *search
+	searchCurrentDoc  bool  // search is limited to searchDoc
+	searchDoc         *Node // document a current-document search is pinned to
 	keysIndex         []string
 	keysIndexNodes    []*Node
 	fuzzyMatch        *fuzzy.Match
@@ -801,6 +803,9 @@ func (m *model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.cancelSearch()
 		m.search = newSearch()
 		return m, m.doSearch(m.searchInput.Value())
+
+	case key.Matches(msg, keyMap.SearchScope):
+		cmd = m.toggleSearchScope()
 
 	default:
 		m.searchInput, cmd = m.searchInput.Update(msg)
@@ -1212,6 +1217,9 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keyMap.SearchPrev):
 		m.selectSearchResult(m.search.cursor - 1)
 		m.recordHistory()
+
+	case key.Matches(msg, keyMap.SearchScope):
+		return m, m.toggleSearchScope()
 
 	case key.Matches(msg, keyMap.GoBack):
 		at, ok := m.cursorPointsTo()

@@ -19,10 +19,7 @@ func (m *model) doSearch(s string) tea.Cmd {
 	run := &searchRun{cancel: make(chan struct{}), done: make(chan struct{})}
 	m.searchRun = run
 	id := m.searchID
-	top := m.top
-	// Documents still streaming in are attached after the last line of the
-	// last one: the search stops there, so it never reads that link.
-	last := lastLine(m.bottom)
+	top, last := m.searchBounds()
 	query := s
 
 	return tea.Batch(m.spinner.Tick, func() tea.Msg {
@@ -42,6 +39,54 @@ func (m *model) doSearch(s string) tea.Cmd {
 		}
 		return searchResultMsg{id: id, query: query, search: result}
 	})
+}
+
+// multipleDocs reports whether more than one top-level document is loaded.
+func (m *model) multipleDocs() bool {
+	return m.top != nil && nextDoc(m.top) != nil
+}
+
+// searchBounds returns the first and last lines a search reads, and pins a
+// current-document search to the document holding the cursor. A search of
+// every document stops at the last line loaded so far: documents still
+// streaming in are attached after it, and the search never reads that link.
+// A search of the current document stops at its own last line, so a document
+// arriving while it runs cannot enter the current-document scope.
+func (m *model) searchBounds() (top, last *Node) {
+	if m.searchCurrentDoc {
+		doc := m.currentTopNode()
+		m.searchDoc = doc
+		if doc != nil {
+			return doc, lastLine(doc)
+		}
+	}
+	return m.top, lastLine(m.bottom)
+}
+
+// toggleSearchScope switches an interactive search between the document the
+// cursor is in and all loaded documents. The current query is searched again
+// in the new scope and the selection moves to its first result. A search
+// running in the background is cancelled before the new one starts.
+func (m *model) toggleSearchScope() tea.Cmd {
+	// The scope distinguishes documents only when more than one is loaded,
+	// and matters only with a search open or being typed.
+	if !m.multipleDocs() {
+		return nil
+	}
+	if !m.searchInput.Focused() && m.searchInput.Value() == "" {
+		return nil
+	}
+	m.searchCurrentDoc = !m.searchCurrentDoc
+	if !m.searchCurrentDoc {
+		m.searchDoc = nil
+	}
+	s := m.searchInput.Value()
+	if s == "" {
+		return nil // The scope applies to the next search.
+	}
+	m.cancelSearch()
+	m.search = newSearch()
+	return m.doSearch(s)
 }
 
 // cancelSearch stops the search running in the background, waiting for it
@@ -149,8 +194,18 @@ func (m *model) redoSearch() {
 
 	cursor := m.search.cursor
 
+	top, last := m.top, (*Node)(nil)
+	if m.searchCurrentDoc {
+		// Keep the scope pinned to the document searched, not to where the
+		// cursor moved since: a document arriving in the meantime stays out.
+		if m.searchDoc == nil || !m.searchDoc.InDocument() {
+			return // Never silently widen a current-document search.
+		}
+		top, last = m.searchDoc, lastLine(m.searchDoc)
+	}
+
 	// Perform search synchronously (no cancellation needed for redo)
-	result, err := executeSearch(m.top, nil, s, nil)
+	result, err := executeSearch(top, last, s, nil)
 	if err != nil {
 		m.search = newSearch()
 		m.search.err = err

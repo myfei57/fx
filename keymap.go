@@ -26,6 +26,7 @@ type KeyMap struct {
 	Search              key.Binding `category:"Search"`
 	SearchNext          key.Binding `category:"Search"`
 	SearchPrev          key.Binding `category:"Search"`
+	SearchScope         key.Binding `category:"Search"`
 	GotoSymbol          key.Binding `category:"Search"`
 	GotoRef             key.Binding `category:"Search"`
 	Yank                key.Binding `category:"Actions"`
@@ -183,6 +184,10 @@ func init() {
 		SearchPrev: key.NewBinding(
 			key.WithKeys("N"),
 			key.WithHelp("", "prev search result"),
+		),
+		SearchScope: key.NewBinding(
+			key.WithKeys("ctrl+t"),
+			key.WithHelp("ctrl+t", "toggle search this document"),
 		),
 		Preview: key.NewBinding(
 			key.WithKeys("p"),
