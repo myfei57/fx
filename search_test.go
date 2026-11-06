@@ -15,7 +15,25 @@ func doSearch(m *model, s string) {
 		return
 	}
 
-	result, err := executeSearch(m.top, nil, s, nil)
+	result, err := executeSearch(m.top, nil, s, false, nil)
+	if err != nil {
+		m.search = newSearch()
+		m.search.err = err
+		return
+	}
+
+	m.search = result
+	m.selectSearchResult(0)
+}
+
+// doLiteralSearch is doSearch in literal mode: regexp metacharacters
+// match themselves.
+func doLiteralSearch(m *model, s string) {
+	if s == "" {
+		return
+	}
+
+	result, err := executeSearch(m.top, nil, s, true, nil)
 	if err != nil {
 		m.search = newSearch()
 		m.search.err = err
@@ -741,4 +759,191 @@ func TestSearchRegexAcrossChunks(t *testing.T) {
 			assert.Nil(t, m.search.err)
 		})
 	}
+}
+
+func literalSearchModel(t *testing.T) *model {
+	// One document per line, so each value is its own searchable line.
+	docs := []string{
+		`{"dot":"a.b"}`,
+		`{"wild":"axb"}`,
+		`{"paren":"a(b)+ c"}`,
+		`{"bs":"test\\d{3}"}`,
+		`{"num":"test123"}`,
+		`{"star":"x*y"}`,
+		`{"bracket":"a[b"}`,
+	}
+
+	m := &model{
+		viewState: viewState{
+			search: newSearch(),
+		},
+	}
+	for _, doc := range docs {
+		node, err := Parse([]byte(doc))
+		require.NoError(t, err)
+		m.appendNode(node)
+	}
+	return m
+}
+
+// In literal mode regexp metacharacters match themselves.
+func TestLiteralSearch(t *testing.T) {
+	m := literalSearchModel(t)
+
+	// A dot is a dot: it does not match "axb", "a(b" or "a[b" as the regexp does.
+	doLiteralSearch(m, "a.b")
+	require.Nil(t, m.search.err)
+	require.Len(t, m.search.results, 1)
+	require.Contains(t, m.search.results[0].Value, "a.b")
+
+	doSearch(m, "a.b")
+	require.Nil(t, m.search.err)
+	require.Len(t, m.search.results, 4, "regexp mode matches a.b, axb, a(b and a[b")
+
+	// Parentheses and a quantifier are text.
+	doLiteralSearch(m, "a(b)+")
+	require.Nil(t, m.search.err)
+	require.Len(t, m.search.results, 1)
+	require.Contains(t, m.search.results[0].Value, "a(b)+")
+
+	doSearch(m, "a(b)+")
+	require.Nil(t, m.search.err)
+	require.Empty(t, m.search.results, "the regexp looks for ab, which the document has none of")
+
+	doLiteralSearch(m, "(")
+	require.Nil(t, m.search.err, "an unclosed parenthesis is not an error in literal mode")
+	require.Len(t, m.search.results, 1)
+
+	// A backslash is a backslash: the rendered value keeps the raw JSON
+	// escape, so it contains two backslashes and the literal query does too.
+	doLiteralSearch(m, `test\\d{3}`)
+	require.Nil(t, m.search.err)
+	require.Len(t, m.search.results, 1)
+	require.Contains(t, m.search.results[0].Value, `\\d{3}`)
+
+	doSearch(m, `test\d{3}`)
+	require.Nil(t, m.search.err)
+	require.Len(t, m.search.results, 1)
+	require.NotContains(t, m.search.results[0].Value, `\d`, "the regexp matches test123 instead")
+
+	doLiteralSearch(m, `\`)
+	require.Nil(t, m.search.err, "a lone backslash is not an error in literal mode")
+	require.NotEmpty(t, m.search.results)
+	require.Contains(t, m.search.results[0].Value, `\\d{3}`)
+
+	// Other metacharacters that make an invalid regexp are plain text too.
+	doLiteralSearch(m, "*")
+	require.Nil(t, m.search.err)
+	require.Len(t, m.search.results, 1)
+	require.Contains(t, m.search.results[0].Value, "x*y")
+
+	doLiteralSearch(m, "[")
+	require.Nil(t, m.search.err)
+	require.Len(t, m.search.results, 1)
+	require.Contains(t, m.search.results[0].Value, "a[b")
+
+	// No match is reported the same way as in regexp mode.
+	doLiteralSearch(m, "a.c")
+	require.Nil(t, m.search.err)
+	require.Empty(t, m.search.results)
+
+	doLiteralSearch(m, "zzz")
+	require.Nil(t, m.search.err)
+	require.Empty(t, m.search.results)
+}
+
+// Literal mode keeps the existing case handling: case-insensitive by
+// default, /i case-insensitive, a trailing / case-sensitive.
+func TestLiteralSearchCase(t *testing.T) {
+	head, err := Parse([]byte(`{"Company": "ACME Corporation"}`))
+	require.NoError(t, err)
+
+	m := &model{
+		viewState: viewState{
+			top:    head,
+			head:   head,
+			search: newSearch(),
+		},
+	}
+
+	doLiteralSearch(m, "acme")
+	require.Nil(t, m.search.err)
+	require.NotEmpty(t, m.search.results, "case-insensitive by default")
+
+	doLiteralSearch(m, "ACME")
+	require.Nil(t, m.search.err)
+	require.NotEmpty(t, m.search.results)
+
+	doLiteralSearch(m, "acme/i")
+	require.Nil(t, m.search.err)
+	require.NotEmpty(t, m.search.results, "/i keeps the query case-insensitive")
+
+	doLiteralSearch(m, "acme/")
+	require.Nil(t, m.search.err)
+	require.Empty(t, m.search.results, "a trailing / keeps the query case-sensitive")
+}
+
+// alt+r toggles between regexp and literal search while the query is
+// kept; esc cancels the search and returns to the default regexp mode.
+func TestSearchLiteral_ToggleMode(t *testing.T) {
+	m := loadModel(t, `{"dot":"a.b","wild":"axb"}`, 40, 10)
+
+	keys(m, "/")
+	typeKeys(m, "a.b")
+	require.False(t, m.searchLiteral, "regexp is the default mode")
+
+	finishSearch(t, m, startSearch(m, "a.b"))
+	require.Len(t, m.search.results, 2)
+	m.searchInput.Blur() // Enter blurs the input.
+
+	// Reopen the search and switch to literal: the typed query is kept.
+	keys(m, "/")
+	keys(m, "alt+r")
+	require.True(t, m.searchLiteral)
+	require.Equal(t, "a.b", m.searchInput.Value(), "the toggle must not insert text")
+	require.Contains(t, view(m), searchLiteralTag)
+
+	finishSearch(t, m, startSearch(m, "a.b"))
+	require.Len(t, m.search.results, 1, "the dot is taken literally")
+	m.searchInput.Blur()
+	out := view(m)
+	require.Contains(t, out, "[literal]")
+	require.Contains(t, out, "found: [1/1]")
+
+	// Switch back to regexp.
+	keys(m, "/", "alt+r")
+	require.False(t, m.searchLiteral)
+	finishSearch(t, m, startSearch(m, "a.b"))
+	require.Len(t, m.search.results, 2)
+	m.searchInput.Blur()
+
+	// esc cancels and resets the mode to regexp.
+	keys(m, "/", "alt+r", "esc")
+	require.False(t, m.searchLiteral)
+	require.False(t, m.searchInput.Focused())
+	require.Empty(t, m.searchInput.Value())
+	require.Empty(t, m.search.results)
+}
+
+// Switching mode while a search runs in the background cancels it with
+// the usual semantics; the new literal search works afterwards.
+func TestSearchLiteral_SwitchWhileSearching(t *testing.T) {
+	m := loadModel(t, bigInput(), 40, 10)
+	keys(m, "z") // Wrap the long strings.
+
+	msgs := startSearch(m, "needle")
+	require.True(t, m.searching)
+
+	keys(m, "/") // Opening the search input stops the running search.
+	require.False(t, m.searching, "opening the search input stops the running search")
+	keys(m, "alt+r")
+	require.True(t, m.searchLiteral)
+
+	finishSearch(t, m, msgs)
+	require.Empty(t, m.search.results, "the cancelled search's result is dropped")
+
+	m.searchInput.Blur() // Enter would blur the input before the new search runs.
+	finishSearch(t, m, startSearch(m, "needle"))
+	require.False(t, m.searching)
+	requireSearchUsable(t, m) // n/N navigation keeps working.
 }

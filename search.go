@@ -24,12 +24,13 @@ func (m *model) doSearch(s string) tea.Cmd {
 	// last one: the search stops there, so it never reads that link.
 	last := lastLine(m.bottom)
 	query := s
+	literal := m.searchLiteral
 
 	return tea.Batch(m.spinner.Tick, func() tea.Msg {
 		if !run.begin() {
 			return searchCancelledMsg{id: id}
 		}
-		result, err := executeSearch(top, last, query, run.cancel)
+		result, err := executeSearch(top, last, query, literal, run.cancel)
 		run.end()
 		if err != nil {
 			errSearch := newSearch()
@@ -150,7 +151,7 @@ func (m *model) redoSearch() {
 	cursor := m.search.cursor
 
 	// Perform search synchronously (no cancellation needed for redo)
-	result, err := executeSearch(m.top, nil, s, nil)
+	result, err := executeSearch(m.top, nil, s, m.searchLiteral, nil)
 	if err != nil {
 		m.search = newSearch()
 		m.search.err = err
@@ -190,9 +191,15 @@ type piece struct {
 // executeSearch performs the core search logic and returns the results.
 // It can be cancelled via the cancel channel (pass nil for non-cancellable search).
 // executeSearch searches the list from top to last, or to its end if last
-// is nil.
-func executeSearch(top, last *Node, s string, cancel <-chan struct{}) (*search, error) {
+// is nil. When literal is true, the query is taken literally: every
+// regexp metacharacter (".", "(", "\\", ...) matches itself. Case
+// handling is unchanged: a query ending in /i is case-insensitive, one
+// ending in / is case-sensitive, and any other query is case-insensitive.
+func executeSearch(top, last *Node, s string, literal bool, cancel <-chan struct{}) (*search, error) {
 	code, ci := regexCase(s)
+	if literal {
+		code = regexp.QuoteMeta(code)
+	}
 	if ci {
 		code = "(?i)" + code
 	}

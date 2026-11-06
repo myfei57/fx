@@ -376,6 +376,7 @@ type model struct {
 	gotoSymbolInput       textinput.Model
 	commandInput          textinput.Model
 	searchInput           textinput.Model
+	searchLiteral         bool       // the search query is literal, not a regexp
 	searching             bool       // search in progress
 	searchRun             *searchRun // the search running in the background
 	searchID              uint64     // increments with each search to detect stale results
@@ -786,6 +787,33 @@ func (m *model) handleCommandKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// searchLiteralTag is the marker shown next to the search input and the
+// search status line in literal mode.
+const searchLiteralTag = "literal"
+
+// focusSearchInput focuses the search input at the end of its text.
+func (m *model) focusSearchInput() {
+	m.searchInput.CursorEnd()
+	m.resizeSearchInput()
+	m.searchInput.Focus()
+}
+
+// resizeSearchInput fits the input to the terminal, reserving room on the
+// right for the mode tag in literal mode.
+func (m *model) resizeSearchInput() {
+	width := m.termWidth - 2 // -1 for the prompt, -1 for the cursor
+	if m.searchLiteral && m.searchTagFits() {
+		width -= len(searchLiteralTag) + 1
+	}
+	m.searchInput.SetWidth(width)
+}
+
+// searchTagFits reports whether the terminal is wide enough for the
+// input and the literal mode tag on the same line.
+func (m *model) searchTagFits() bool {
+	return m.termWidth-2 > len(searchLiteralTag)+5
+}
+
 func (m *model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch {
@@ -794,7 +822,12 @@ func (m *model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.search = newSearch()
 		m.searchInput.Blur()
 		m.searchInput.SetValue("")
+		m.searchLiteral = false // back to the default regexp search
 		m.showCursor = true
+
+	case key.Matches(msg, keyMap.SearchToggleMode):
+		m.searchLiteral = !m.searchLiteral
+		m.resizeSearchInput()
 
 	case msg.String() == "enter":
 		m.searchInput.Blur()
@@ -1201,9 +1234,7 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.commandInput.Focus()
 
 	case key.Matches(msg, keyMap.Search):
-		m.searchInput.CursorEnd()
-		m.searchInput.SetWidth(m.termWidth - 2) // -1 for the prompt, -1 for the cursor
-		m.searchInput.Focus()
+		m.focusSearchInput()
 
 	case key.Matches(msg, keyMap.SearchNext):
 		m.selectSearchResult(m.search.cursor + 1)

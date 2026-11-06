@@ -219,7 +219,7 @@ func (m *model) render() string {
 		screen = append(screen, m.commandInput.View()...)
 	} else if m.searchInput.Focused() {
 		screen = append(screen, '\n')
-		screen = append(screen, m.searchInput.View()...)
+		screen = append(screen, []byte(m.searchInputView())...)
 	} else if m.queryInput.Focused() {
 		for _, line := range m.completionGridView() {
 			screen = append(screen, '\n')
@@ -229,11 +229,7 @@ func (m *model) render() string {
 		screen = append(screen, m.queryInputView()...)
 	} else if m.searchInput.Value() != "" {
 		screen = append(screen, '\n')
-		re, ci := regexCase(m.searchInput.Value())
-		re = "/" + re + "/"
-		if ci {
-			re += "i"
-		}
+		re := m.searchPatternView()
 		if m.searching {
 			status := fmt.Sprintf("%s searching...", m.spinner.View())
 			screen = append(screen, flex(m.termWidth, re, status)...)
@@ -251,6 +247,31 @@ func (m *model) render() string {
 	}
 
 	return string(screen)
+}
+
+// searchInputView renders the focused search input, with the mode tag
+// right-aligned in literal mode.
+func (m *model) searchInputView() string {
+	view := m.searchInput.View()
+	if !m.searchLiteral || !m.searchTagFits() {
+		return view
+	}
+	return flex(m.termWidth, view, searchLiteralTag)
+}
+
+// searchPatternView renders the current search query the way it is
+// interpreted: /pattern/, with an i suffix in case-insensitive mode and a
+// literal marker in literal search mode.
+func (m *model) searchPatternView() string {
+	pattern, ci := regexCase(m.searchInput.Value())
+	s := "/" + pattern + "/"
+	if ci {
+		s += "i"
+	}
+	if m.searchLiteral {
+		s += " [" + searchLiteralTag + "]"
+	}
+	return s
 }
 
 func (m *model) centerLine(n *Node) {
