@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -68,6 +70,7 @@ func (l *loader) read(parser engine.Parser) {
 	firstOk := false
 	for {
 		node, err := parser.Parse()
+		parsed := err == nil
 		if err != nil {
 			if err == io.EOF {
 				l.send(eofMsg{gen: l.gen})
@@ -87,7 +90,7 @@ func (l *loader) read(parser engine.Parser) {
 		} else {
 			firstOk = true
 		}
-		if !l.send(nodeMsg{node: node, gen: l.gen}) {
+		if !l.send(nodeMsg{node: node, gen: l.gen, ok: parsed}) {
 			return
 		}
 	}
@@ -130,6 +133,81 @@ func (l *loader) stopLoading() {
 	}
 }
 
+// loadSummary is the diagnostic of one completed load. It keeps no input
+// content: only the number of documents parsed, whether the user stopped
+// the load by reloading again, and the line of the first error.
+type loadSummary struct {
+	gen       uint64 // generation of the load this summary describes
+	docs      int    // top-level documents successfully parsed
+	cancelled bool   // a new reload started before this load ended
+	errLine   int    // line of the first parse error, 0 if none
+}
+
+// text renders the summary for the command line. It is composed of the
+// numbers above only, never of the input or the error text. failed is
+// known while the error ends the load, as an error without a location
+// (a missing file, a read error) is not distinguishable from success by
+// the stored fields alone.
+func (s loadSummary) text(failed bool) string {
+	docs := fmt.Sprintf("%d %s", s.docs, plural(s.docs, "document"))
+	switch {
+	case s.cancelled:
+		return "reload cancelled: " + docs + " parsed"
+	case failed && s.errLine > 0:
+		return fmt.Sprintf("reload failed: first error on line %d, %s parsed", s.errLine, docs)
+	case failed:
+		return "reload failed: " + docs + " parsed"
+	default:
+		return "reloaded: " + docs
+	}
+}
+
+// plural returns word with its English plural suffix when n != 1.
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
+}
+
+// completeLoad records the outcome of the current generation, unless a
+// newer generation already replaced it. End messages of a stopped
+// generation keep their stale generation and are dropped by Update, so
+// they can never overwrite a newer summary. The summary is shown after a
+// reload; the initial load ends quietly.
+func (m *model) completeLoad(err error) {
+	gen := m.loadGen
+	if m.loadSummary.gen > gen {
+		return
+	}
+	m.loadSummary = loadSummary{gen: gen, docs: m.loadDocs, errLine: errorLine(err)}
+	if gen > 0 {
+		m.message = &message{text: m.loadSummary.text(err != nil), isErr: err != nil}
+	}
+}
+
+// cancelLoad records gen as stopped by a new reload, keeping the number
+// of documents parsed before it was stopped.
+func (m *model) cancelLoad(gen uint64) {
+	if m.loadSummary.gen > gen {
+		return
+	}
+	m.loadSummary = loadSummary{gen: gen, docs: m.loadDocs, cancelled: true}
+	if gen > 0 {
+		m.message = &message{text: m.loadSummary.text(false)}
+	}
+}
+
+// errorLine reports the input line err points at, 0 if unknown. The
+// summary stores the location only, never the error text or its snippet.
+func errorLine(err error) int {
+	var syntaxErr *SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return syntaxErr.Line()
+	}
+	return 0
+}
+
 // reloadPos is the cursor position to restore once the reloaded
 // document arrives.
 type reloadPos struct {
@@ -144,8 +222,14 @@ func (m *model) reload() tea.Cmd {
 	if engine.FilePath == "" {
 		return nil
 	}
+	gen := m.loadGen
+	if m.loader != nil && !m.eof {
+		// The previous load is still reading: this reload cancels it.
+		m.cancelLoad(gen)
+	}
 	m.loader.stopLoading()
 	m.loadGen++
+	m.loadDocs = 0
 	m.loadErr = nil
 
 	m.reloadPos = m.cursorReloadPos()
@@ -175,6 +259,7 @@ func (m *model) reload() tea.Cmd {
 	f, err := os.Open(engine.FilePath)
 	if err != nil {
 		engine.SetInput(nil)
+		m.completeLoad(err)
 		m.showReloadError(err)
 		return queryCmd
 	}

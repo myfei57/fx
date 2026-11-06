@@ -398,6 +398,8 @@ type model struct {
 	loader                *loader       // reads the input, replaced on reload
 	loadGen               uint64        // generation of loader, stale messages are dropped
 	loadErr               error         // why the last reload failed, nil if the input is complete
+	loadSummary           loadSummary   // diagnostic of the last completed load
+	loadDocs              int           // top-level documents parsed by the load in progress
 	reloadPos             *reloadPos    // cursor position to restore after reload, nil if none
 }
 
@@ -426,6 +428,7 @@ type location struct {
 type nodeMsg struct {
 	node *Node
 	gen  uint64
+	ok   bool // Parse succeeded: a parsed document, not recovered text
 }
 
 type errorMsg struct {
@@ -477,6 +480,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.loadGen {
 			return m, nil
 		}
+		m.completeLoad(nil)
 		m.setEOF()
 		if m.rawModeOnEOF {
 			// Reapply raw mode after the process piping to fx exits. Done
@@ -491,6 +495,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.loadGen {
 			return m, nil
 		}
+		m.completeLoad(msg.err)
 		if m.loadGen > 0 {
 			// A reloaded file may be mid-write; keep fx open to reload again.
 			m.showReloadError(msg.err)
@@ -502,6 +507,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case nodeMsg:
 		if msg.gen != m.loadGen {
 			return m, nil
+		}
+		if msg.ok {
+			m.loadDocs++
 		}
 		if m.original != nil {
 			m.appendOriginal(msg.node)

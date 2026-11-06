@@ -116,6 +116,22 @@ func TestJsonParser_Parse_strict(t *testing.T) {
 	}
 }
 
+func TestSyntaxError_Line(t *testing.T) {
+	p := jsonx.NewJsonParser(strings.NewReader(`{"a": 1}`+"\n"+`[]`+"\n"+`{ broken`), false)
+	_, err := p.Parse()
+	require.NoError(t, err)
+	_, err = p.Parse()
+	require.NoError(t, err)
+	_, err = p.Parse()
+	require.Error(t, err)
+
+	var syntaxErr *jsonx.SyntaxError
+	require.ErrorAs(t, err, &syntaxErr)
+	require.Equal(t, 3, syntaxErr.Line())
+	// The message and snippet stay part of the error text.
+	require.Contains(t, err.Error(), "on line 3.")
+}
+
 func TestJsonParser_Recovery(t *testing.T) {
 	brokenJSON := `{ "a": 1 }here goes the text`
 	t.Run("Recover", func(t *testing.T) {

@@ -10,6 +10,22 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
+// SyntaxError is a parse error at a line of the input.
+type SyntaxError struct {
+	message string
+	line    int
+	snippet string
+}
+
+func (e *SyntaxError) Error() string {
+	return fmt.Sprintf("%s on line %d.\n\n%s\n", e.message, e.line, e.snippet)
+}
+
+// Line reports the input line the error was found on.
+func (e *SyntaxError) Line() int {
+	return e.line
+}
+
 func (p *JsonParser) errorSnippet(message string) error {
 	termWidth, _, err := term.GetSize(os.Stdout.Fd())
 	if err != nil {
@@ -27,12 +43,11 @@ func (p *JsonParser) errorSnippet(message string) error {
 	snippet := "  " + before + after
 	snippet += "\n  " + strings.Repeat(".", max(0, width-1)) + "^"
 
-	return fmt.Errorf(
-		"%s on line %d.\n\n%s\n",
-		message,
-		p.realLineNumber,
-		snippet,
-	)
+	return &SyntaxError{
+		message: message,
+		line:    p.realLineNumber,
+		snippet: snippet,
+	}
 }
 
 func (p *JsonParser) contextBefore(maxWidth int) (s string, width int) {

@@ -366,3 +366,165 @@ func TestLoader_ParserWithoutRecover(t *testing.T) {
 	msg := l.wait()()
 	require.Equal(t, errorMsg{err: os.ErrClosed}, msg)
 }
+
+func TestReload_SummarySuccess(t *testing.T) {
+	m, file := newReloadModel(t, `{"a": 1}`)
+
+	require.NoError(t, os.WriteFile(file, []byte(`{"a": 1}`+"\n"+`{"b": 2}`+"\n"+`[3]`), 0o644))
+	reloadKey(m)
+
+	require.True(t, m.eof)
+	require.Equal(t, m.loadGen, m.loadSummary.gen)
+	require.Equal(t, 3, m.loadSummary.docs)
+	require.False(t, m.loadSummary.cancelled)
+	require.Zero(t, m.loadSummary.errLine)
+	require.NotNil(t, m.message)
+	require.False(t, m.message.isErr)
+	require.Equal(t, "reloaded: 3 documents", m.message.text)
+}
+
+// A strict parse error ends the reload with the documents parsed before
+// it and the line of the first error.
+func TestReload_SummaryStrictError(t *testing.T) {
+	flagStrict = true
+	t.Cleanup(func() { flagStrict = false })
+	m, file := newReloadModel(t, `{"a": 1}`)
+
+	require.NoError(t, os.WriteFile(file, []byte(`{"a": 1}`+"\n"+`{"b": `), 0o644))
+	reloadKey(m)
+
+	require.Equal(t, m.loadGen, m.loadSummary.gen)
+	require.Equal(t, 1, m.loadSummary.docs, "the document before the error is counted")
+	require.False(t, m.loadSummary.cancelled)
+	require.Equal(t, 2, m.loadSummary.errLine)
+	require.NotNil(t, m.message)
+	require.True(t, m.message.isErr)
+	require.Contains(t, m.message.text, "line 2")
+	require.NotContains(t, m.message.text, "{", "the summary keeps no input content")
+}
+
+// An error without a location (a missing file) reports the failure with
+// no error line.
+func TestReload_SummaryMissingFile(t *testing.T) {
+	m, _ := newReloadModel(t, `{"a": 1}`)
+	// A path that never existed: removing the open file races its close
+	// on Windows, so point the reload at a missing path instead.
+	engine.FilePath = filepath.Join(t.TempDir(), "missing.json")
+
+	reloadKey(m)
+
+	require.True(t, m.eof)
+	require.Equal(t, m.loadGen, m.loadSummary.gen)
+	require.Zero(t, m.loadSummary.docs)
+	require.False(t, m.loadSummary.cancelled)
+	require.Zero(t, m.loadSummary.errLine)
+	require.NotNil(t, m.message)
+	require.True(t, m.message.isErr)
+	require.Equal(t, "reload failed: 0 documents parsed", m.message.text)
+}
+
+// Many reloads in a row: the summary is that of the last load only.
+func TestReload_SummaryConsecutiveReloads(t *testing.T) {
+	var content strings.Builder
+	for i := range 2000 {
+		fmt.Fprintf(&content, "{\"i\": %d}\n", i)
+	}
+	m, _ := newReloadModel(t, content.String())
+	for range 20 {
+		m.reload()
+	}
+	runAll(m, m.reload())
+
+	require.True(t, m.eof)
+	require.Equal(t, m.loadGen, m.loadSummary.gen)
+	require.Equal(t, 2000, m.loadSummary.docs)
+	require.False(t, m.loadSummary.cancelled)
+	require.Zero(t, m.loadSummary.errLine)
+	require.Equal(t, "reloaded: 2000 documents", m.message.text)
+}
+
+// A reload started while the previous load is still reading cancels it:
+// the cancelled summary keeps the documents parsed so far, and the new
+// generation replaces it once it ends.
+func TestReload_SummaryCancelledMidLoad(t *testing.T) {
+	m, _ := newReloadModel(t, `{"a": 1}`)
+
+	// A generation-2 load with two documents and no end message.
+	m.loadGen++
+	m.eof = false
+	m.loadDocs = 0
+	m.loader = &loader{gen: m.loadGen, stop: make(chan struct{}), msgs: make(chan tea.Msg)}
+	m.Update(nodeMsg{node: parseDoc(t, `{"x": 1}`), gen: m.loadGen, ok: true})
+	m.Update(nodeMsg{node: parseDoc(t, `{"y": 2}`), gen: m.loadGen, ok: true})
+	m.Update(nodeMsg{node: parseDoc(t, `"tail"`), gen: m.loadGen}) // recovered text: ok=false
+	require.Equal(t, 2, m.loadDocs)
+
+	// Reloading again stops generation 2 before it ended.
+	cmd := m.reload()
+	require.Equal(t, uint64(2), m.loadSummary.gen)
+	require.True(t, m.loadSummary.cancelled)
+	require.Equal(t, 2, m.loadSummary.docs)
+	require.Zero(t, m.loadSummary.errLine)
+	require.NotNil(t, m.message)
+	require.Equal(t, "reload cancelled: 2 documents parsed", m.message.text)
+	require.NotContains(t, m.message.text, "{", "the summary keeps no input content")
+
+	// The new generation ends and its summary replaces the cancelled one.
+	runAll(m, cmd)
+	require.True(t, m.eof)
+	require.Equal(t, m.loadGen, m.loadSummary.gen)
+	require.Equal(t, 1, m.loadSummary.docs)
+	require.False(t, m.loadSummary.cancelled)
+	require.Equal(t, "reloaded: 1 document", m.message.text)
+}
+
+// End messages of a generation replaced by a reload must not overwrite
+// the newer generation's summary, nor the message showing it.
+func TestReload_StaleEndKeepsNewSummary(t *testing.T) {
+	m, file := newReloadModel(t, `{"a": 1}`+"\n"+`{"b": 2}`)
+
+	require.NoError(t, os.WriteFile(file, []byte(`[3]`), 0o644))
+	reloadKey(m)
+	require.Equal(t, m.loadGen, m.loadSummary.gen)
+	require.Equal(t, 1, m.loadSummary.docs)
+	msg := m.message
+
+	stale := m.loadGen - 1
+	m.Update(eofMsg{gen: stale})
+	m.Update(errorMsg{err: os.ErrClosed, gen: stale})
+
+	require.Equal(t, m.loadGen, m.loadSummary.gen)
+	require.Equal(t, 1, m.loadSummary.docs)
+	require.False(t, m.loadSummary.cancelled)
+	require.Zero(t, m.loadSummary.errLine)
+	require.Same(t, msg, m.message)
+}
+
+// Text recovered past a non-strict parse error is displayed but is not a
+// successfully parsed document.
+func TestReload_SummaryIgnoresRecoveredText(t *testing.T) {
+	m, file := newReloadModel(t, `{"a": 1}`)
+
+	require.NoError(t, os.WriteFile(file, []byte("HTTP/1.1 200 OK\n"+`{"a": 2}`), 0o644))
+	reloadKey(m)
+
+	require.True(t, m.eof)
+	require.Equal(t, 1, m.loadSummary.docs, "recovered text is not a parsed document")
+	require.Zero(t, m.loadSummary.errLine)
+}
+
+// The diagnostic summary does not interfere with restoring the cursor to
+// its path in the reloaded document.
+func TestReload_SummaryKeepsCursorRestore(t *testing.T) {
+	m, file := newReloadModel(t, `{"a": 1, "b": {"c": 2}}`)
+	m.selectNode(m.findByPath([]any{"b", "c"}))
+
+	require.NoError(t, os.WriteFile(file, []byte(`{"a": 1, "b": {"c": 3}}`), 0o644))
+	reloadKey(m)
+
+	at, ok := m.cursorPointsTo()
+	require.True(t, ok)
+	require.Equal(t, "3", at.Value)
+	require.Equal(t, ".b.c", m.cursorPath())
+	require.Equal(t, 1, m.loadSummary.docs)
+}
